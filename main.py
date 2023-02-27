@@ -77,6 +77,22 @@ class LayerDropout:
         self.dinputs = dvalues * self.binary_mask
 
 
+class ActivationSigmoid:
+    def __init__(self):
+        self.inputs = None
+        self.output = None
+        self.dinputs = None
+
+    def forward(self, inputs):
+        # Save input and calculate/save output of the sigmoid function
+        self.inputs = inputs
+        self.output = 1 / (1 + np.exp(-inputs))
+
+    def backward(self, dvalues):
+        # Derivative calculated from output of the sigmoid function
+        self.dinputs = dvalues * (1 - self.output) * self.output
+
+
 class ActivationReLU:
     def __init__(self):
         self.inputs = None
@@ -160,6 +176,39 @@ class Loss:
                 np.sum(layer.biases * layer.biases)
 
         return regularization_loss
+
+
+class BinaryCrossentropy(Loss):
+    def forward(self, y_pred, y_true):
+        # Clip data to prevent division by 0
+        # Clip both sides to not drag mean towards any value
+        y_pred_clipped = np.clip(y_pred, 1e-7, 1 - 1e-7)
+
+        # Calculate sample-wise loss
+        sample_losses = -(y_true * np.log(y_pred_clipped) +
+                          (1 - y_true) * np.log(1 - y_pred_clipped))
+        sample_losses = np.mean(sample_losses, axis=-1)
+
+        return sample_losses
+
+    def backward(self, dvalues, y_true):
+        # Number of samples
+        samples = len(dvalues)
+
+        # Number of outputs in every sample
+        # We'll use the first sample to count them
+        outputs = len(dvalues[0])
+
+        # Clip data to prevent division by 0
+        # Clip both sides to not drag mean towards any value
+        clipped_dvalues = np.clip(dvalues, 1e-7, 1 - 1e-7)
+
+        # Calculate gradient
+        self.dinputs = -(y_true / clipped_dvalues -
+                         (1 - y_true) / (1 - clipped_dvalues)) / outputs
+
+        # Normalize gradient
+        self.dinputs = self.dinputs / samples
 
 
 class CategoricalCrossentropy(Loss):
@@ -417,47 +466,60 @@ class OptimizerAdam:
 
 
 # Create dataset
-X, y = spiral_data(samples=1000, classes=3)
+X, y = spiral_data(samples=100, classes=2)
+
+# Reshape labels to be a list of lists.
+# Inner list contains one output (either 0 or 1) per each output neuron, 1 in this case
+y = y.reshape(-1, 1)
+
 # Create Dense layer with 2 input features and 64 output values
-dense1 = LayerDense(2, 512, weight_regularizer_l2=5e-4,
+dense1 = LayerDense(2, 64, weight_regularizer_l2=5e-4,
                     bias_regularizer_l2=5e-4)
+
 # Create ReLU activation (to be used with Dense layer):
 activation1 = ActivationReLU()
-# Create dropout layer
-dropout1 = LayerDropout(0.1)
-# Create second Dense layer with 64 input features (as we take output
-# of previous layer here) and 3 output values (output values)
-dense2 = LayerDense(512, 3)
-# Create Softmax classifier's combined loss and activation
-loss_activation = ActivationSoftmaxLossCategoricalCrossentropy()
+
+# Create second Dense layer with 64 input features (as we take output of previous layer here) and 1 output value
+dense2 = LayerDense(64, 1)
+
+# Create Sigmoid activation
+activation2 = ActivationSigmoid()
+
+# Create loss function
+loss_function = BinaryCrossentropy()
+
 # Create optimizer
-optimizer = OptimizerAdam(learning_rate=0.05, decay=5e-5)
+optimizer = OptimizerAdam(decay=5e-7)
 
 # Train in loop
 for epoch in range(10001):
     # Perform a forward pass of our training data through this layer
     dense1.forward(X)
+
     # Perform a forward pass through activation function
     # takes the output of first dense layer here
     activation1.forward(dense1.output)
-    # Perform a forward pass through Dropout layer
-    dropout1.forward(activation1.output)
+
     # Perform a forward pass through second Dense layer
     # takes outputs of activation function of first layer as inputs
-    dense2.forward(dropout1.output)
-    # Perform a forward pass through the activation/loss function
-    # takes the output of second dense layer here and returns loss
-    data_loss = loss_activation.forward(dense2.output, y)
+    dense2.forward(activation1.output)
+
+    # Perform a forward pass through activation function
+    # takes the output of second dense layer here
+    activation2.forward(dense2.output)
+
+    # Calculate the data loss
+    data_loss = loss_function.calculate(activation2.output, y)
+
     # Calculate regularization penalty
-    regularization_loss = loss_activation.loss.regularization_loss(
-        dense1) + loss_activation.loss.regularization_loss(dense2)
+    regularization_loss = loss_function.regularization_loss(
+        dense1) + loss_function.regularization_loss(dense2)
+
     # Calculate overall loss
     loss = data_loss + regularization_loss
     # Calculate accuracy from output of activation2 and targets
-    # calculate values along first axis
-    predictions = np.argmax(loss_activation.output, axis=1)
-    if len(y.shape) == 2:
-        y = np.argmax(y, axis=1)
+    # Part in the brackets returns a binary mask: array consisting of True/False values, multiplying it by 1 changes it into array of 1s and 0s
+    predictions = (activation2.output > 0.5) * 1
     accuracy = np.mean(predictions == y)
     if not epoch % 100:
         print(f'epoch: {epoch}, ' +
@@ -466,12 +528,14 @@ for epoch in range(10001):
               f'data_loss: {data_loss:.3f}, ' +
               f'reg_loss: {regularization_loss:.3f}), ' +
               f'lr: {optimizer.current_learning_rate}')
+
     # Backward pass
-    loss_activation.backward(loss_activation.output, y)
-    dense2.backward(loss_activation.dinputs)
-    dropout1.backward(dense2.dinputs)
-    activation1.backward(dropout1.dinputs)
+    loss_function.backward(activation2.output, y)
+    activation2.backward(loss_function.dinputs)
+    dense2.backward(activation2.dinputs)
+    activation1.backward(dense2.dinputs)
     dense1.backward(activation1.dinputs)
+
     # Update weights and biases
     optimizer.pre_update_params()
     optimizer.update_params(dense1)
@@ -480,22 +544,32 @@ for epoch in range(10001):
 
 # Validate the model
 # Create test dataset
-X_test, y_test = spiral_data(samples=100, classes=3)
+X_test, y_test = spiral_data(samples=100, classes=2)
+
+# Reshape labels to be a list of lists
+# Inner list contains one output (either 0 or 1) per each output neuron, 1 in this case
+y_test = y_test.reshape(-1, 1)
+
 # Perform a forward pass of our testing data through this layer
 dense1.forward(X_test)
+
 # Perform a forward pass through activation function
 # takes the output of first dense layer here
 activation1.forward(dense1.output)
+
 # Perform a forward pass through second Dense layer
 # takes outputs of activation function of first layer as inputs
 dense2.forward(activation1.output)
-# Perform a forward pass through the activation/loss function
-# takes the output of second dense layer here and returns loss
-loss = loss_activation.forward(dense2.output, y_test)
+
+# Perform a forward pass through activation function
+# takes the output of second dense layer here
+activation2.forward(dense2.output)
+
+# Calculate the data loss
+loss = loss_function.calculate(activation2.output, y_test)
+
 # Calculate accuracy from output of activation2 and targets
-# calculate values along first axis
-predictions = np.argmax(loss_activation.output, axis=1)
-if len(y_test.shape) == 2:
-    y_test = np.argmax(y_test, axis=1)
+# Part in the brackets returns a binary mask: array consisting of True/False values, multiplying it by 1 changes it into array of 1s and 0s
+predictions = (activation2.output > 0.5) * 1
 accuracy = np.mean(predictions == y_test)
 print(f'validation, acc: {accuracy:.3f}, loss: {loss:.3f}')
