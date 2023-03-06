@@ -1,5 +1,5 @@
 # https://www.youtube.com/playlist?list=PLQVvvaa0QuDcjD5BAw2DxE6OF2tius3V3
-# file:///C:/Users/Davi%20Sampaio/Documents/Books/AI/good/Neural-Networks-From-Scratch-in-Python.pdf
+# file:///C:/Users/davia/Documents/Books/Artificial-Inteligence/Neural-Networks-From-Scratch-in-Python.pdf
 import numpy as np
 import nnfs
 from nnfs.datasets import spiral_data, sine_data
